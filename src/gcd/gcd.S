@@ -11,6 +11,61 @@
     .type   gcd_u32_asm, @function
     .align  2
 gcd_u32_asm:
-    li      a0, 0
+    beq a0, x0, ret_b
+    beq a1, x0, ret_a
+    li t0, 0
+
+common_loop:
+    or t1, a0, a1
+    andi t2, t1, 0x0001
+    bgt t2, x0, strip_a
+    addi t0, t0, 1
+    srli a0, a0, 1
+    srli a1, a1, 1
+    j common_loop
+
+strip_a:
+    andi t1, a0, 0x0001
+    bnez t1, strip_b
+    srli a0, a0, 1
+    j strip_a
+
+strip_b:
+    andi t1, a1, 0x0001
+    bnez t1, main_loop
+    srli a1, a1, 1
+    j strip_b
+
+main_loop:
+    beq a0, a1, done
+    bltu a0, a1, b_bigger
+    sub a0, a0, a1
+
+shift_a:    
+    srli a0, a0, 1
+    andi t1, a0, 0x0001
+    beqz t1, shift_a
+    j main_loop
+
+b_bigger:
+    sub a1, a1, a0
+
+shift_b:    
+    srli a1, a1, 1
+    andi t1, a1, 0x0001
+    beqz t1, shift_b
+    j main_loop
+
+done:
+    sll a0, a0, t0
+
+ret_a:
     ret
+
+ret_b:
+    mv a0, a1
+    ret
+
     .size   gcd_u32_asm, .-gcd_u32_asm
+    
+     
