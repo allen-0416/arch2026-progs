@@ -10,14 +10,25 @@
 # rank o (0..728); the solved cube is (0, 0). IDA* runs on an explicit stack
 # instead of recursion, with h = max(pdb_p[p], pdb_o[o]) from tables.S.
 #
+# Two sorted tables from far.S, keyed by key = p << 10 | o (o < 1024, so no
+# multiply), shorten the search:
+#   far_tab   the 2,644 states at distance 11, entry = key << 4 | m. At the
+#             root, such a state takes move m first and leaves distance 10.
+#   near_tab  the 12,224 states at distance 0..5, entry = key << 3 | d. When
+#             the pattern databases give h <= 5, a child's h becomes its exact
+#             distance d, or 6 when the child is not listed.
+#
 # Registers kept across the search:
 #   s0  perm_move          s5  bound (IDA* threshold)
 #   s1  ori_move           s6  current stack frame
 #   s2  pdb_p              s7  g, depth of the current frame
 #   s3  pdb_o              s8  perm_row; reused as the solution length
 #   s4  path               s9  ori_row
+#   s10 1 when far_tab supplied path[0], else 0
+#   s11 near_tab
 #   a3  out (a1 is reused for the orientation rank)
 #   a2  cap
+#   a4..a7, t1, t5, t6: lower_bound arguments and scratch (a7 is its link)
 #
 # Stack frame, 12 bytes:
 #   0 p    2 o    4 np    6 no    (.half: node, and its child in progress)
@@ -42,7 +53,7 @@ twist:  .zero 8                 # twist at positions 1..7, 0..2
 
     .balign 4
 stack:  .zero 132               # 11 frames: a pushed node has g <= 10
-path:   .zero 12                # moves 0..8
+path:   .zero 12                # move ids 0..8, up to 11 moves
 
     .text
 
@@ -159,10 +170,57 @@ ori_i:
     la   s4, path
     la   s8, perm_row
     la   s9, ori_row
+    li   s10, 0
+    la   s11, near_tab
 
     or   t0, a0, a1
     beqz t0, solved_root        # already solved: empty solution
 
+    slli a6, a0, 10
+    or   a6, a6, a1             # key = p << 10 | o
+    slli a6, a6, 4              # K = key << 4: far_tab entries hold m below
+    la   a4, far_tab
+    li   a5, 2644
+    jal  a7, lower_bound
+    lw   t0, 0(a4)
+    srli t1, t0, 4              # key of the entry found
+    srli t2, a6, 4              # key looked for
+    bne  t1, t2, root_h         # not at distance 11: plain search
+    andi t3, t0, 15             # m
+    sb   t3, 0(s4)              # path[0] = m
+    li   s10, 1
+    addi s4, s4, 1              # the search writes from path + 1
+
+    li   t4, 0                  # face
+    li   t5, 3
+
+fm_loop:                        # face = m / 3, turn = m % 3 by subtraction
+    bltu t3, t5, fm_done
+    addi t3, t3, -3
+    addi t4, t4, 1
+    j    fm_loop
+
+fm_done:
+    slli t6, t4, 2
+    add  t0, s8, t6
+    lw   t0, 0(t0)
+    add  t0, s0, t0             # &perm_move[face][0]
+    add  t1, s9, t6
+    lw   t1, 0(t1)
+    add  t1, s1, t1             # &ori_move[face][0]
+    addi t3, t3, 1              # turn + 1 quarter turns
+
+q_loop:
+    slli t2, a0, 1
+    add  t2, t0, t2
+    lhu  a0, 0(t2)              # p = perm_move[face][p]
+    slli t2, a1, 1
+    add  t2, t1, t2
+    lhu  a1, 0(t2)              # o = ori_move[face][o]
+    addi t3, t3, -1
+    bnez t3, q_loop
+
+root_h:
     add  t0, s2, a0
     lbu  t1, 0(t0)              # pdb_p[p]
     add  t0, s3, a1
@@ -241,10 +299,30 @@ not_popped:
     addi t4, t5, 0
 
 child_h_done:
-    add  t4, t4, s7
-    addi t4, t4, 1
-    bgtu t4, s5, search_loop    # prune: g + 1 + h > bound
+    add  t1, t4, s7
+    addi t1, t1, 1
+    bgtu t1, s5, search_loop    # pdb alone prunes: no lookup needed
+    li   t6, 6
+    bgeu t4, t6, push_child     # h >= 6: the state is not in near_tab
+    slli a6, t2, 10             # K = (np << 10 | no) << 3
+    or   a6, a6, t3
+    slli a6, a6, 3
+    mv   a4, s11
+    li   a5, 12224
+    jal  a7, lower_bound
+    lw   t6, 0(a4)
+    srli t5, t6, 3
+    srli t1, a6, 3
+    li   t4, 6                  # not found: distance >= 6
+    bne  t5, t1, near_done
+    andi t4, t6, 7              # found: exact distance, low 3 bits
 
+near_done:
+    addi t1, s7, 1              # prune again with the new h
+    add  t1, t1, t4
+    bgtu t1, s5, search_loop
+
+push_child:
     sh   t2, 12(s6)             # push: next frame at 12(s6)
     sh   t3, 14(s6)
     sh   t2, 16(s6)
@@ -297,9 +375,11 @@ found:
     addi s8, s7, 1
 
 write_out:
-    la t0, names
+    sub  s4, s4, s10            # back to path, far move included
+    add  s8, s8, s10            # and count it
+    la   t0, names
     mv   t1, s4
-    add t2, s4, s8             # end = path + len
+    add  t2, s4, s8             # end = path + len
     li   t3, 0                  # need: bytes, '\0' included
     li   t6, ' '
 
@@ -327,14 +407,14 @@ need_ok:
     bltu a2, t3, too_small      # cap < need, unsigned: cap is size_t
 
 # Pass 2: write. a4 is the out cursor, t1 the path cursor.
-    mv   a4, a3               # out cursor starts at out
+    mv   a4, a3                 # out cursor starts at out
     mv   t1, s4
 
 put_loop:
     beq t1, t2, put_end
-    beq t1, s4, put_name       # no space before the first move
-    sb   t6, 0(a4)            # separator
-    addi a4, a4, 1
+    beq t1, s4, put_name        # no space before the first move
+    sb   t6, 0(a4)              # separator
+    addi a4, a4, 1  
 
 put_name:
     lbu  t4, 0(t1)
@@ -344,7 +424,7 @@ put_name:
     sb   t5, 0(a4)              # first character
     addi a4, a4, 1
     lbu  t5, 1(t4)
-    beq  t5, t6, put_next           # one-character name
+    beq  t5, t6, put_next       # one-character name
     sb   t5, 0(a4)
     addi a4, a4, 1
 
@@ -353,16 +433,38 @@ put_next:
     j    put_loop
 
 put_end:
-    sb   x0, 0(a4)            # terminator
-    mv   a0, s8               # return len
+    sb   x0, 0(a4)              # terminator
+    mv   a0, s8                 # return len
     j    rs_return
 
 too_small:
     beqz a2, too_small_ret      # cap == 0: out may not be written
-    sb   zero, 0(a3)          # out[0] = '\0'
+    sb   zero, 0(a3)            # out[0] = '\0'
 
 too_small_ret:
     li   a0, -2
     j    rs_return
+
+# lower_bound: first entry >= a6 in the ascending .word array a4[0..a5).
+# In: a4 = first, a5 = n, a6 = K, a7 = return address.
+# Out: a4 = &entry (may be one past the end). Clobbers a5, t1, t5, t6.
+lower_bound:
+    beqz a5, lb_done
+    srli t1, a5, 1              # half
+    slli t5, t1, 2
+    add  t5, a4, t5             # &first[half]
+    lw   t6, 0(t5)
+    bgeu t6, a6, lb_left        # entry >= K: answer is at or left of mid
+    addi a4, t5, 4              # first = mid + 1
+    addi t1, t1, 1              # n -= half + 1
+    sub  a5, a5, t1
+    j    lower_bound
+
+lb_left:
+    mv   a5, t1                 # n = half
+    j    lower_bound
+
+lb_done:
+    jr   a7                     # return through a7
 
     .size   rubik_solve_asm, .-rubik_solve_asm
